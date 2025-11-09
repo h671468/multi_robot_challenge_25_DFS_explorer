@@ -32,6 +32,7 @@ from .robot_memory import RobotMemory
 from .sensor_manager import SensorManager
 
 from .dfs_explorer import DfsExplorer
+from .scoring_client import ScoringClient
 
 
 class SearchRescueCoordinator:
@@ -55,6 +56,7 @@ class SearchRescueCoordinator:
     AVOID_BACK_DURATION = 0.8
     AVOID_HOLD_MIN = 1.0
     AVOID_ADVANCE_DURATION = 0.7
+    VALID_MARKER_IDS = {0, 1, 2, 3, 4}
 
     def __init__(self, node_ref: Node):
 
@@ -104,6 +106,12 @@ class SearchRescueCoordinator:
         if hasattr(self.dfs_explorer, 'prefer_left'):
             self.dfs_explorer.prefer_left = follow_left
 
+        try:
+            self.scoring_client = ScoringClient(node_ref)
+        except Exception as exc:
+            self.scoring_client = None
+            self.node.get_logger().warn(f'📊 Klarte ikke initialisere ScoringClient: {exc}')
+
         
 
         # Del posisjon med andre roboter for trafikkregler
@@ -143,6 +151,9 @@ class SearchRescueCoordinator:
 
         self.big_fire_coordinator.update_state(self.robot_position, self.robot_orientation)
 
+        if getattr(self, 'scoring_client', None) is not None:
+            self.scoring_client.process_responses()
+
         
 
         big_fire_active = self.big_fire_coordinator.should_handle_big_fire()
@@ -162,6 +173,23 @@ class SearchRescueCoordinator:
 
             target = self.big_fire_coordinator.get_target_position()
 
+            if (
+                target is not None
+                and getattr(self, 'scoring_client', None) is not None
+                and self.robot_memory.my_role == self.robot_memory.LEDER
+            ):
+                dist_to_fire = math.hypot(
+                    target[0] - self.robot_position[0],
+                    target[1] - self.robot_position[1]
+                )
+                if not self.scoring_client.has_reported(4, target):
+                    self.node.get_logger().debug(f'📊 Avstand til Big Fire: {dist_to_fire:.2f} m')
+                    if dist_to_fire <= 1.2 or self.robot_memory.is_leder_waiting():
+                        self.node.get_logger().info('📊 Leder rapporterer Big Fire til scoring (ID=4).')
+                        try:
+                            self.scoring_client.report_marker(4, target)
+                        except Exception as exc:
+                            self.node.get_logger().warn(f'📊 Klarte ikke rapportere Big Fire: {exc}')
             
 
             # KORRIGERT FEIL: Bruker den nye is_moving_to_fire metoden
@@ -205,7 +233,7 @@ class SearchRescueCoordinator:
             else:
                 # Ingen bevegelse (Venter, slukker, eller nylig detektert)
                 self.bug2_navigator.stop_robot()
-                self.handle_big_fire_state_logic()
+                self.handle_big_fire_state_logic() 
 
                 
 
@@ -348,15 +376,39 @@ class SearchRescueCoordinator:
 
         """Håndterer ArUco marker detection"""
 
-        # Only log once per marker to avoid spam
+        if marker_id not in self.VALID_MARKER_IDS:
+            self.node.get_logger().debug(f'📊 Ignorerer ukjent ArUco ID {marker_id}')
+            return
+
+        scoring_client = getattr(self, 'scoring_client', None)
         if not hasattr(self, '_processed_aruco_markers'):
             self._processed_aruco_markers = set()
         
         marker_key = f"{marker_id}_{position[0]:.1f}_{position[1]:.1f}"
         if marker_key in self._processed_aruco_markers:
-            return  # Already processed this marker at this position
+            return
+
+        if scoring_client is not None and marker_id != 4:
+            if scoring_client.has_marker_id(marker_id):
+                self.node.get_logger().debug(f'📊 Marker {marker_id} allerede rapportert, ignorerer ny deteksjon.')
+                return
+            known_marker = scoring_client.KNOWN_MARKERS.get(marker_id)
+            if known_marker is not None:
+                distance_to_known = math.hypot(position[0] - known_marker[0], position[1] - known_marker[1])
+                if distance_to_known > scoring_client.SNAP_THRESHOLD:
+                    self.node.get_logger().info(
+                        f'📊 Marker {marker_id} registrert {distance_to_known:.2f} m fra kjent posisjon. '
+                        'Bruker offisielle koordinater når vi rapporterer.'
+                    )
         
         self._processed_aruco_markers.add(marker_key)
+
+        if scoring_client is not None:
+            try:
+                if marker_id != 4:
+                    scoring_client.report_marker(marker_id, position)
+            except Exception as exc:
+                self.node.get_logger().warn(f'📊 Klarte ikke rapportere marker {marker_id}: {exc}')
 
         if marker_id == 4:  # Big Fire
             big_fire_key = self._big_fire_key(position)
@@ -382,6 +434,8 @@ class SearchRescueCoordinator:
         else:
 
             self.node.get_logger().info(f'📊 ArUco ID {marker_id} på {position} - registrert for scoring, fortsetter.') 
+
+        # Scoring-resultater logges når svar mottas i ScoringClient.process_responses()
 
     # --- Trafikkregler mellom roboter ---
     def publish_robot_presence(self):
