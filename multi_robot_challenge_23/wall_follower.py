@@ -27,14 +27,16 @@ class WallFollower:
     MAX_RANGE = 3.5          
     TURN_LEFT_SPEED_ANG = 0.8 # Svingehastighet for innvendige hjørner (økt)
     TURN_LEFT_SPEED_LIN = 0.0 # Ingen fremoverfart under sving
+    OPENING_THRESHOLD = 0.9
     
     def get_front_distance(self, scan: LaserScan) -> float:
         """Hjelpefunksjon for å hente avstand foran roboten."""
         return self._range_at_deg(scan, 0.0)
     
-    def __init__(self, node_ref: Node, sensor_manager=None):
+    def __init__(self, node_ref: Node, sensor_manager=None, follow_left: bool = False):
         self.node = node_ref
         self.sensor_manager = sensor_manager
+        self.follow_left = follow_left
         
         # Wall following state
         self.state = self.STATE_FOLLOW_WALL
@@ -93,11 +95,42 @@ class WallFollower:
             return np.min(slice_array) if len(slice_array) > 0 else self.MAX_RANGE
 
         # Inndeling for veggfølging med 360 skanning
-        self.regions = {
-            'front': min(safe_min(ranges[0:int(n*0.05)]), safe_min(ranges[int(n*0.95):])),  
-            'right': safe_min(ranges[int(n*0.80):int(n*0.90)]),  
-            'back_right': safe_min(ranges[int(n*0.75):int(n*0.80)]),  
+        base_regions = {
+            'front': min(safe_min(ranges[0:int(n*0.05)]), safe_min(ranges[int(n*0.95):])),
+            'right': safe_min(ranges[int(n*0.80):int(n*0.90)]),
+            'back_right': safe_min(ranges[int(n*0.75):int(n*0.80)]),
+            'left': safe_min(ranges[int(n*0.10):int(n*0.20)]),
+            'back_left': safe_min(ranges[int(n*0.20):int(n*0.25)]),
         }
+        if self.follow_left:
+            self.regions = {
+                'front': base_regions['front'],
+                'right': base_regions['left'],
+                'back_right': base_regions['back_left'],
+                'left': base_regions['right'],
+                'back_left': base_regions['back_right'],
+            }
+        else:
+            self.regions = base_regions
+
+    def get_openings(self, threshold: float = None) -> list:
+        """Returner åpne retninger basert på LIDAR."""
+        if threshold is None:
+            threshold = self.OPENING_THRESHOLD
+        openings = []
+        if self.regions.get('front', self.MAX_RANGE) > threshold:
+            openings.append('FRONT')
+        if self.regions.get('left', self.MAX_RANGE) > threshold:
+            openings.append('LEFT')
+        if self.regions.get('right', self.MAX_RANGE) > threshold:
+            openings.append('RIGHT')
+        return openings
+
+    def is_dead_end(self, openings: list = None) -> bool:
+        """Returner True dersom roboten står i blindvei."""
+        if openings is None:
+            openings = self.get_openings()
+        return len(openings) == 0
 
     def decide_state(self):
         """Decide which state to use based on sensor readings"""
@@ -127,7 +160,7 @@ class WallFollower:
         if d_front < self.FRONT_THRESHOLD:
             return self.STATE_TURN_LEFT
         
-        # Veggen har stoppet, utvendig hjørne
+        # Veggen har stoppet (utvendig hjørne) – dreie mot veggen igjen
         elif d_right > (self.WALL_DISTANCE + 0.4) and d_back_right > (self.WALL_DISTANCE + 0.4):
             return self.STATE_TURN_RIGHT
             
@@ -143,24 +176,24 @@ class WallFollower:
         """Action for turning left when obstacle ahead"""
         twist_msg = Twist()
         twist_msg.linear.x = self.TURN_LEFT_SPEED_LIN
-        twist_msg.angular.z = self.TURN_LEFT_SPEED_ANG 
+        twist_msg.angular.z = self.TURN_LEFT_SPEED_ANG
         return twist_msg
 
     def do_turn_right(self):
         """Action for turning right when wall ends"""
         twist_msg = Twist()
         twist_msg.linear.x = self.LINEAR_SPEED * 0.5
-        twist_msg.angular.z = -0.15 
+        twist_msg.angular.z = -0.15
         return twist_msg
 
     def do_follow_wall(self):
         """Action for following wall with distance control"""
-        d_right = self.regions['right']
-        error = d_right - self.WALL_DISTANCE
+        d_side = self.regions['right']
+        error = d_side - self.WALL_DISTANCE
         angular_vel = -self.KP_ANGULAR * error
         
         twist_msg = Twist()
-        twist_msg.angular.z = max(min(angular_vel, 0.5), -0.5) 
+        twist_msg.angular.z = max(min(angular_vel, 0.5), -0.5)
         twist_msg.linear.x = self.LINEAR_SPEED
         return twist_msg
 
@@ -174,7 +207,7 @@ class WallFollower:
             self.state_start_time = self.node.get_clock().now().nanoseconds / 1e9
             self.node.get_logger().info(f"🧱 State change to: {self.state}")
 
-        state_str = {0: "TURN_LEFT", 1: "FOLLOW_WALL", 2: "TURN_RIGHT"}[self.state]
+        state_str = {0: "TURN_LEFT", 1: "FOLLOW_WALL", 2: "TURN_RIGHT"}.get(self.state, "UNKNOWN")
         
         # Only log state when it changes
         if not hasattr(self, '_last_logged_state') or self._last_logged_state != self.state:
@@ -196,7 +229,11 @@ class WallFollower:
             )
             self._last_cmd_vel = (twist_msg.linear.x, twist_msg.angular.z)
 
-        self.publish_twist(twist_msg.linear.x, twist_msg.angular.z)
+        lin = twist_msg.linear.x
+        ang = twist_msg.angular.z
+        if self.follow_left:
+            ang *= -1.0
+        self.publish_twist(lin, ang)
 
     def _range_at_deg(self, scan: LaserScan, deg, default=100.0):
         """Hent avstand ved vinkel (grader) fra siste LIDAR"""
@@ -231,3 +268,30 @@ class WallFollower:
     def stop_robot(self):
         """Stopper robot bevegelse"""
         self.publish_twist(0.0, 0.0)
+
+    def hold_position_against_wall(self):
+        """
+        Hold posisjonen uten å gli fremover.
+        Trekker svakt tilbake og roterer mot veggen.
+        """
+        lin = -0.05
+        ang = 0.4  # positiv = venstre
+        if self.follow_left:
+            ang *= -1.0
+        self.publish_twist(lin, ang)
+
+    def backup_along_wall(self):
+        """Kjør et lite steg bakover mens du holder veggen."""
+        lin = -0.15
+        ang = 0.25
+        if self.follow_left:
+            ang *= -1.0
+        self.publish_twist(lin, ang)
+
+    def advance_along_wall(self):
+        """Kjør et lite steg fremover etter møte."""
+        lin = 0.15
+        ang = -0.25
+        if self.follow_left:
+            ang *= -1.0
+        self.publish_twist(lin, ang)

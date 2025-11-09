@@ -94,6 +94,23 @@ class OccupancyGridManager:
         
         return map_position
 
+    def world_to_map(self, world_x: float, world_y: float) -> tuple:
+        """Konverter verdenskoordinater til map-indekser."""
+        if not self.is_map_available():
+            return None
+
+        origin_x = self.map_msg.info.origin.position.x
+        origin_y = self.map_msg.info.origin.position.y
+        resolution = self.map_msg.info.resolution
+
+        map_y = int((world_x - origin_x) / resolution)
+        map_x = int((world_y - origin_y) / resolution)
+
+        if map_x < 0 or map_y < 0 or map_x >= self.map_msg.info.height or map_y >= self.map_msg.info.width:
+            return None
+
+        return (map_x, map_y)
+
     def get_map_iter(self, x: int, y: int) -> int:
         """
         Translate x and y map coordinates into corresponding map list integer value
@@ -171,6 +188,26 @@ class OccupancyGridManager:
         """
         occupancy = self.get_occupancy_value(x, y)
         return occupancy == -1
+
+    def has_line_of_sight(self, start: Point, end: Point, step: float = 0.05, obstacle_threshold: int = 50) -> bool:
+        """Sjekk om det finnes fri sikt mellom to punkter i kartet."""
+        if not self.is_map_available():
+            return True
+
+        distance = math.hypot(end.x - start.x, end.y - start.y)
+        steps = max(int(distance / step), 1)
+
+        for i in range(steps + 1):
+            t = i / steps
+            sample_x = start.x + (end.x - start.x) * t
+            sample_y = start.y + (end.y - start.y) * t
+            map_indices = self.world_to_map(sample_x, sample_y)
+            if map_indices is None:
+                return False
+            if self.get_occupancy_value(map_indices[0], map_indices[1]) > obstacle_threshold:
+                return False
+
+        return True
 
     def find_bounding_box(self) -> dict:
         """

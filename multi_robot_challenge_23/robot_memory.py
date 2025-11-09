@@ -35,11 +35,10 @@ class RobotMemory:
         self.big_fire_logged = False
         self.waiting_logged = False
         self.bonus_reported = False  # Flagg for om +300pt bonus er rapportert
-        
         # Leder & Supporter roles
         self.my_role = None
         self.big_fire_state = self.NORMAL
-        
+
         # Wall following state
         self.is_turning = False
         
@@ -56,7 +55,11 @@ class RobotMemory:
         self.big_fire_detected_by_me = True
         self.big_fire_position = position
         self.my_role = self.LEDER
-        self.big_fire_state = self.LEDER_GOING_TO_FIRE
+        self.big_fire_state = self.LEDER_WAITING
+        self.target_position = None
+        self.navigation_active = False
+        self.i_am_at_fire = False
+        self.waiting_logged = False
 
     def set_big_fire_detected_by_other(self, position: tuple):
         """Sett Big Fire oppdaget av annen robot"""
@@ -64,6 +67,8 @@ class RobotMemory:
         self.big_fire_position = position
         self.my_role = self.SUPPORTER
         self.big_fire_state = self.SUPPORTER_GOING_TO_FIRE
+        self.target_position = position
+        self.navigation_active = True
 
     def transition_to_leder_waiting(self):
         """Transition til Leder venting"""
@@ -193,6 +198,7 @@ class RobotMemory:
         self.bonus_reported = False
         self.target_position = None
         self.navigation_active = False
+        self.big_fire_intermediate_target = None
 
     # --- ArUco processing helpers ---
     def is_aruco_processed(self, marker_id: int) -> bool:

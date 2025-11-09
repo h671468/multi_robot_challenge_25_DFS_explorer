@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import math
+import time
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 from .wall_follower import WallFollower
@@ -14,7 +15,7 @@ class Bug2Navigator:
     
     # --- INNSTILLINGER ---
     FRONT_THRESHOLD = 0.8       # Avstand for å detektere hindring og bytte til WALL_FOLLOWING
-    GOAL_THRESHOLD = 0.3        # Avstand for å betrakte målet som nådd
+    GOAL_THRESHOLD = 0.45       # Avstand for å betrakte målet som nådd (økt for Big Fire)
     ANGLE_TOLERANCE = 20        # Vinkeltoleranse for M-linje (grader)
     MIN_DIST_CHECK = 1.0        # Minimum avstand for å sjekke M-linje
     
@@ -44,8 +45,17 @@ class Bug2Navigator:
         self.M_start_dist_to_goal = float('inf')  # Avstand til mål ved M-linje start
         self.M_line_angle = 0.0     # Vinkel til M-linjen
         self.regions = {}           # Laser scan regions
+
+        # Wall-follow tracking
+        self.wall_follow_start_time = None
+        self.wall_follow_start_dist = float('inf')
+        self.MIN_WALL_FOLLOW_TIME = 2.0
+        self.LEAVE_DISTANCE_IMPROVEMENT = 1.2
+        self.LEAVE_ANGLE_TOLERANCE = math.radians(15.0)
+        self.MIN_FRONT_CLEARANCE = 1.5
         
         self.node.get_logger().info('🐛 Delegert Bug2Navigator initialisert')
+        self.goal_aborted = False
 
     def set_goal(self, position: tuple):
         """Setter nytt mål og oppdaterer GoalNavigator."""
@@ -58,6 +68,9 @@ class Bug2Navigator:
         self.start_x = self.robot_position[0]
         self.start_y = self.robot_position[1]
         self.state = self.GO_TO_GOAL
+        self.wall_follow_start_time = None
+        self.wall_follow_start_dist = float('inf')
+        self.goal_aborted = False
         
         # Reset M-line variables
         self.M_start_dist_to_goal = float('inf')
@@ -82,6 +95,7 @@ class Bug2Navigator:
         self.M_start_y = 0.0
         self.goal_navigator.clear_goal()
         self.stop_robot()
+        self.goal_aborted = False
 
     def update_robot_pose(self, position: tuple, orientation: float):
         """Oppdater robot posisjon og orientering."""
@@ -142,6 +156,8 @@ class Bug2Navigator:
             self.M_start_x = self.robot_position[0]
             self.M_start_y = self.robot_position[1]
             self.M_start_dist_to_goal = self.get_current_distance_to_goal()
+            self.wall_follow_start_time = time.time()
+            self.wall_follow_start_dist = self.M_start_dist_to_goal
             
             # Change state
             self.state = self.WALL_FOLLOWING
@@ -159,6 +175,10 @@ class Bug2Navigator:
         is_on_line = self.is_on_M_line()
         is_closer_to_goal = current_dist_to_goal < self.M_start_dist_to_goal
 
+        if self.wall_follow_start_time is None:
+            self.wall_follow_start_time = time.time()
+        elapsed = time.time() - self.wall_follow_start_time
+
         # Only log wall following state every 15th time
         if not hasattr(self, '_wall_follow_log_counter'):
             self._wall_follow_log_counter = 0
@@ -173,6 +193,14 @@ class Bug2Navigator:
         # Alternative exit: if front is clear and we're closer to goal, exit wall following
         front_distance = self.regions.get('front', 10.0)
         
+        progress_ratio = (self.M_start_dist_to_goal - current_dist_to_goal) if self.M_start_dist_to_goal != float('inf') else 0.0
+        progress_ratio = max(progress_ratio, 0.0)
+        max_allowable = max(0.5, 4.0 - progress_ratio)
+
+        if elapsed < self.MIN_WALL_FOLLOW_TIME:
+            self.wall_follower.follow_wall(msg)
+            return
+
         if is_on_line and is_closer_to_goal:
             self.node.get_logger().warn(
                 f"✅ BUG2: Kan forlate vegg: På M-linjen OG nærmere målet. "
@@ -190,11 +218,34 @@ class Bug2Navigator:
             self.state = self.GO_TO_GOAL
             return
         
-        if current_dist_to_goal > (self.M_start_dist_to_goal + 4.0): 
-            self.node.get_logger().error("❌ BUG2: Gikk for langt vekk fra målet under veggfølging. Stopper navigasjon.")
-            self.stop_robot()
+        if current_dist_to_goal > (self.M_start_dist_to_goal + max_allowable): 
+            self.node.get_logger().error(
+                f"❌ BUG2: Gikk for langt vekk fra målet ({current_dist_to_goal:.2f}m, grense {self.M_start_dist_to_goal + max_allowable:.2f}m). Stopper navigasjon."
+            )
+            self.abort_goal()
             return
-            
+
+        improvement = (self.wall_follow_start_dist - current_dist_to_goal)
+        angle_to_goal = math.atan2(self.target_y - self.robot_position[1], self.target_x - self.robot_position[0])
+        angle_diff = abs(self.normalize_angle(angle_to_goal - self.M_line_angle))
+
+        can_leave = (
+            improvement > self.LEAVE_DISTANCE_IMPROVEMENT and
+            angle_diff < self.LEAVE_ANGLE_TOLERANCE and
+            is_closer_to_goal and
+            front_distance > self.MIN_FRONT_CLEARANCE
+        )
+
+        if can_leave:
+            self.node.get_logger().info(
+                f"✅ BUG2: Forlater vegg – forbedring {improvement:.2f}m, front {front_distance:.2f}m, "
+                f"vinkel {math.degrees(angle_diff):.1f}°, tid {elapsed:.1f}s"
+            )
+            self.state = self.GO_TO_GOAL
+            self.wall_follow_start_time = None
+            self.wall_follow_start_dist = float('inf')
+            return
+
         # Fortsett wall following - DELEGER til WallFollower
         self.wall_follower.follow_wall(msg)
 
@@ -252,3 +303,25 @@ class Bug2Navigator:
         """Stopper robot bevegelse via de delegerte navigatørene."""
         self.goal_navigator.stop_robot()
         self.wall_follower.stop_robot()
+
+    def abort_goal(self):
+        """Avslutt aktivt mål fordi det virker utilgjengelig."""
+        if self.target_position is None:
+            return
+        self.goal_aborted = True
+        self.target_position = None
+        self.target_x = 0.0
+        self.target_y = 0.0
+        self.state = self.GO_TO_GOAL
+        self.M_start_dist_to_goal = float('inf')
+        self.M_start_x = 0.0
+        self.M_start_y = 0.0
+        self.goal_navigator.clear_goal()
+        self.stop_robot()
+
+    def was_goal_aborted(self) -> bool:
+        """Returner True én gang dersom siste mål ble avbrutt."""
+        if self.goal_aborted:
+            self.goal_aborted = False
+            return True
+        return False

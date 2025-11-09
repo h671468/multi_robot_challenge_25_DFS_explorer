@@ -109,12 +109,16 @@ class BigFireCoordinator:
 
     def robot_at_fire_callback(self, msg: String):
         """Håndterer meldinger om at annen robot er ved brannen. Logger KUN ved tilstandsskifte."""
-        if msg.data != self.robot_id and "AT_FIRE" in msg.data:
-            if not self.memory.other_robot_at_fire: # Logg kun ved tilstandsskifte
-                self.memory.set_other_robot_at_fire(True)
-                # Parse ID fra meldingen for renere logg
-                robot_id = msg.data.split(":")[0]
-                self.node.get_logger().info(f'🔥 Annen robot ({robot_id}) er ved brannen!')
+        if "AT_FIRE" not in msg.data:
+            return
+
+        robot_id = msg.data.split(":")[0]
+        if robot_id == self.robot_id:
+            return
+
+        if not self.memory.other_robot_at_fire: # Logg kun ved tilstandsskifte
+            self.memory.set_other_robot_at_fire(True)
+            self.node.get_logger().info(f'🔥 Annen robot ({robot_id}) er ved brannen!')
 
     def fire_extinguished_callback(self, msg: String):
         """Håndterer meldinger om at brannen er slukket. Logger KUN ved tilstandsskifte."""

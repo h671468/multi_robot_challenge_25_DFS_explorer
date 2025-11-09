@@ -13,7 +13,7 @@ from nav_msgs.msg import Odometry
 
 from std_msgs.msg import Int64
 
-from geometry_msgs.msg import Pose
+from geometry_msgs.msg import Pose, Point
 
 from .occupancy_grid_manager import OccupancyGridManager
 
@@ -562,3 +562,11 @@ class SensorManager:
         """Visualiser map bounding box i RViz"""
 
         self.occupancy_grid_manager.visualize_bounding_box() 
+
+    def has_line_of_sight(self, target_position: tuple, step: float = 0.05) -> bool:
+        """Sjekk om det er fri sikt fra roboten til mål i kartet."""
+        if not self.occupancy_grid_manager.is_map_available():
+            return True
+        start = Point(x=self.robot_position[0], y=self.robot_position[1], z=0.0)
+        end = Point(x=target_position[0], y=target_position[1], z=0.0)
+        return self.occupancy_grid_manager.has_line_of_sight(start, end, step) 
