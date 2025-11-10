@@ -444,6 +444,20 @@ class SensorManager:
         return self.normalize_angle(heading_error)
 
 
+    @staticmethod
+    def to_point(position: tuple) -> Point:
+
+        """Konverter et (x, y) par til geometry_msgs/Point"""
+
+        point = Point()
+        if position is None:
+            return point
+        point.x = float(position[0])
+        point.y = float(position[1])
+        point.z = 0.0
+        return point
+
+
     def normalize_angle(self, angle: float) -> float:
 
         """Normaliser vinkel til [-π, π]"""

@@ -99,7 +99,7 @@ def generate_launch_description():
         name='robot_controller_tb3_0',
         namespace=first_tb3,
         output='screen',
-        parameters=[{'use_sim_time': use_sim_time}]
+        parameters=[{'use_sim_time': use_sim_time}, {'world_file': world_file_path}]
     )
     
     robot2_node = Node(
@@ -108,7 +108,7 @@ def generate_launch_description():
         name='robot_controller_tb3_1',
         namespace=second_tb3,
         output='screen',
-        parameters=[{'use_sim_time': use_sim_time}]
+        parameters=[{'use_sim_time': use_sim_time}, {'world_file': world_file_path}]
     )
     
     # Scoring system node
